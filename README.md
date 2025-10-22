@@ -73,6 +73,10 @@ PC側のIPを同一セグメントに設定しましょう。
 
 ### UrgBenriPlus（北陽公式ツール）の設定
 
+URG は、北陽電機製のレーザ距離センサです。広範囲の距離データを高精度で取得できます。
+
+https://sourceforge.net/p/urgnetwork/wiki/whatis_jp/
+
 UrgBenriPlusを以下のリンクからインストールする
 
 https://www.hokuyo-aut.co.jp/search/single.php?serial=16#download
@@ -93,6 +97,78 @@ https://www.hokuyo-aut.co.jp/search/single.php?serial=16#download
 4. 「▶」ボタンで接続を開始します。
 
 <img width="973" height="626" alt="UrgBenriPlus設定" src="https://github.com/user-attachments/assets/92faf08a-b498-428b-a3d8-e09395ee630e" />
+
+
+
+
+
+<img width="1228" height="275" alt="{D5F0F390-7E6C-4BA5-B1C9-9995652CD2A3}" src="https://github.com/user-attachments/assets/d83b3eee-7407-416a-8d24-2a034f679aa9" />
+
+# UrgBenriPlusを少しいじってみた
+
+## ステータス情報取得コマンド
+
+画面右の「コンソール」を押して「PP」と入力すると写真のようなデータが返ってくる
+分かりやすくすると以下の表になる
+
+| 項目       | 意味            | 値                    |
+| -------- | ------------- | -------------------- |
+| **MODL** | モデル名          | `UST-20LX`           |
+| **DMIN** | 測定可能な最短距離（mm） | `20`                 |
+| **DMAX** | 測定可能な最長距離（mm） | `60000`              |
+| **ARES** | 角度分解能（ステップ数）  | `1440`（＝約0.25°/step） |
+| **AMIN** | 最小角度（ステップ）    | `0`                  |
+| **AMAX** | 最大角度（ステップ）    | `1080`（＝約270°）       |
+| **AFRT** | 中央角度（ステップ）    | `540`                |
+| **SCAN** | スキャン周期（ms）    | `2400`（＝約25Hz）       |
+
+→分かること距離の計測範囲 2cm~60m（ほんとかよ～）
+
+他にも「VV」、「II」コマンドがあるらしい
+
+参考
+https://sourceforge.net/p/urgnetwork/wiki/scip_status_jp/
+
+## 距離・強度データを表示するツールを使ってみる
+
+Urg Viewer -- 距離・強度データを表示するアプリケーションです。 記録したデータを再生することが可能です。
+
+以下からダウンロードして .exeをクリックして開く
+
+https://sourceforge.net/p/urgnetwork/wiki/urg_viewer_jp/
+
+
+<img width="1916" height="1011" alt="{677D7963-E4C8-4077-A1CF-A2E4CB3B5E39}" src="https://github.com/user-attachments/assets/bb6b904a-d936-4333-b23f-c7a53340d35a" />
+
+オレンジの線
+
+- センサに対して手が近いほどオレンジの線が広がる
+
+青の線
+
+- レーザーが届いている部分
+
+トラブルシューティング
+
+- FW　ONにしたら接続できた
+
+<img width="1922" height="1004" alt="{49552A43-3182-4AB7-8BB1-7FC8C2445E67}" src="https://github.com/user-attachments/assets/aa0185e4-576f-415d-9968-81b04613081d" />
+
+
+
+## やったこと（できなかった）
+
+### YLMセンサとの通信
+https://sourceforge.net/p/urgnetwork/wiki/ylm_sample_jp/
+
+- ビルドは成功
+- Web UIとのアクセスができない
+
+ping 192.168.0.10 は通る
+FWをOFFにしたが、アクセスできない
+https://github.com/Hokuyo-aut/ylm_sample_cpp/blob/main/README_ja.md
+
+
 
 
 

@@ -325,6 +325,11 @@ SCIP2.0エンコーディングの解読
 距離(mm) = ((char1 - 0x30) << 12) | ((char2 - 0x30) << 6) | (char3 - 0x30)
 
 
+decode.cs（本来の命名はLiDARTest.csのまま、検証段階なので一時的にdecode.cs）
+
+<img width="1916" height="993" alt="{5562BDC6-90C8-4286-A27B-AE5CECFF19F4}" src="https://github.com/user-attachments/assets/b8e40a91-5102-4d95-8eea-cac57658730a" />
+
+
 ---
 
 ## トラブルシューティング

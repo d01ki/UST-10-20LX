@@ -156,117 +156,174 @@ https://sourceforge.net/p/urgnetwork/wiki/urg_viewer_jp/
 
 
 
-## やったこと（できなかった）
-
-### YLMセンサとの通信
-https://sourceforge.net/p/urgnetwork/wiki/ylm_sample_jp/
-
-- ビルドは成功
-- Web UIとのアクセスができない
-
-ping 192.168.0.10 は通る
-FWをOFFにしたが、アクセスできない
-https://github.com/Hokuyo-aut/ylm_sample_cpp/blob/main/README_ja.md
-
-
-
-
-
 ## Unityで直接UST-20LXと通信する方法
 
-Unityプロジェクトのセットアップ
-1. 新規Unityプロジェクトを作成
-
-Unity 2021.3 LTS以降を推奨
-3D (URP) テンプレートを選択
-
-2. センサー通信用のC#スクリプト作成
-
-3. タッチ検出スクリプトの作成
-壁に触れた部分を検出するスクリプト：
-
-4. 水面エフェクトのシェーダー作成
-
-5. 水面エフェクト用のスクリプト
-
-   Unity でのセットアップ手順
-ステップ1: スクリプトの配置
-
-Unityで Assets/Scripts フォルダを作成
-上記の4つのスクリプトをコピー＆ペースト：
-
-HokuyoUST20LX.cs
-WallTouchDetector.cs
-WaterRippleEffect.cs
 
 
-Assets/Shaders フォルダを作成
-WaterRipple.shader を配置
+```
+using System;
+using System.Net;
+using System.Net.Sockets;
+using System.Text;
+using UnityEngine;
+using System.Threading;
 
-ステップ2: シーンのセットアップ
+public class LiDARTest : MonoBehaviour
+{
+    TcpClient client;
+    NetworkStream stream;
+    Thread receiveThread;
+    bool isRunning = false;
+    
+    void Start()
+    {
+        Debug.Log("=== LiDAR通信開始 (TCP版) ===");
+        
+        try
+        {
+            // TCPで接続
+            client = new TcpClient();
+            client.Connect("192.168.0.10", 10940);
+            stream = client.GetStream();
+            
+            Debug.Log("TCP接続成功！");
+            
+            // 接続確認
+            SendCommand("SCIP2.0\n");
+            Thread.Sleep(300);
+            
+            // 計測開始
+            SendCommand("BM\n");
+            Thread.Sleep(300);
+            
+            // データ送信要求
+            SendCommand("MD0000072500101\n");
+            
+            // 受信スレッド開始
+            isRunning = true;
+            receiveThread = new Thread(ReceiveData);
+            receiveThread.Start();
+            
+            Debug.Log("受信スレッド開始");
+        }
+        catch (Exception e)
+        {
+            Debug.LogError($"接続エラー: {e.Message}");
+        }
+    }
+    
+    void SendCommand(string cmd)
+    {
+        try
+        {
+            byte[] data = Encoding.ASCII.GetBytes(cmd);
+            stream.Write(data, 0, data.Length);
+            Debug.Log($"送信: {cmd.Trim()}");
+        }
+        catch (Exception e)
+        {
+            Debug.LogError($"送信エラー: {e.Message}");
+        }
+    }
+    
+    void ReceiveData()
+    {
+        byte[] buffer = new byte[4096];
+        
+        while (isRunning)
+        {
+            try
+            {
+                if (stream.DataAvailable)
+                {
+                    int bytesRead = stream.Read(buffer, 0, buffer.Length);
+                    string msg = Encoding.ASCII.GetString(buffer, 0, bytesRead);
+                    
+                    Debug.Log("!!!!!!!! 受信成功 (TCP) !!!!!!!!");
+                    Debug.Log($"受信データサイズ: {bytesRead} bytes");
+                    Debug.Log($"受信内容: {msg.Substring(0, Math.Min(200, msg.Length))}");
+                    Debug.Log("========================================");
+                }
+                Thread.Sleep(10);
+            }
+            catch (Exception e)
+            {
+                Debug.LogError($"受信エラー: {e.Message}");
+            }
+        }
+    }
+    
+    void OnApplicationQuit()
+    {
+        Debug.Log("終了処理");
+        isRunning = false;
+        
+        if (receiveThread != null && receiveThread.IsAlive)
+        {
+            receiveThread.Join(1000);
+        }
+        
+        if (stream != null)
+        {
+            SendCommand("QT\n");
+            Thread.Sleep(100);
+            stream.Close();
+        }
+        
+        if (client != null)
+        {
+            client.Close();
+        }
+        
+        Debug.Log("終了完了");
+    }
+}
+```
 
-空のGameObjectを作成（名前: SensorManager）
 
-HokuyoUST20LX スクリプトをアタッチ
-WallTouchDetector スクリプトをアタッチ
-
-
-水面エフェクトのPrefabを作成
-
-Hierarchy で 3D Object → Quad を作成
-名前を WaterRipple に変更
-Rotation を X:-90 に設定（床に平行に）
-Scale を (0.5, 0.5, 0.5) に設定
+受信できているデータ
+- SCIP2.0の応答（21 bytes）
+- MDコマンドの応答（2275 bytes）
+- 距離データが連続で届いている（99b で始まるデータ）
+画面下部に見える16進数のような文字列がLiDARの測定データ
 
 
-マテリアルの作成
-
-Assets/Materials フォルダを作成
-右クリック → Create → Material （名前: WaterRippleMat）
-Shader を Custom/WaterRipple に変更
-このマテリアルを WaterRipple Quadにアタッチ
+<img width="1897" height="990" alt="image" src="https://github.com/user-attachments/assets/d03cb4b8-2ace-495b-bf09-0fab241c4036" />
 
 
-Prefab化
+受信内容
 
-WaterRipple に WaterRippleEffect.cs をアタッチ
-WaterRipple を Project ウィンドウにドラッグしてPrefab化
-Hierarchyから削除
+```
+受信内容: MD0000072500100
+99b
+C?i1L
+06m02e0KD0KD0K>0K70K60Jl0Ji0Jf0Jd0J\0JQ0JG0JE0JD0J@0J60J40Ij0J10`
+Id0Ie0I`0I_0IY0IT0IV0IT0IT0IR0IF0IN0IA0IA0I?0I;0I80Ho0Hl0Hl0Hj0H_
+h0Hh0Hd0Hh0Ho0H^0H]0Hf0Ha0Ha0I:1GD1Ga1Gi1G
+UnityEngine.Debug:Log (object)
+LiDARTest:ReceiveData () (at Assets/Scripts/LiDARTest.cs:81)
+System.Threading.ThreadHelper:ThreadStart ()
 
+```
 
-設定
+データ構造
 
-SensorManager の WallTouchDetector コンポーネント：
+```
+MD0000072500100    ← コマンドエコー（送信したコマンドの確認）
+99b                ← ステータスコード（99b = 正常）
+C?i1L              ← タイムスタンプ
+06m02e0K...        ← 距離データ（SCIP2.0エンコード）
+```
 
-Sensor に SensorManager 自身をドラッグ
-Water Ripple Prefab に作成した WaterRipple Prefabをドラッグ
+SCIP2.0エンコーディングの解読
 
+- **3文字で1つの距離値**を表現
+- 各文字は6ビット（0x30を引いてデコード）
+- 例：`06m` → 距離1つ、`02e` → 距離1つ
 
-ステップ3: テスト実行
+デコード式
+距離(mm) = ((char1 - 0x30) << 12) | ((char2 - 0x30) << 6) | (char3 - 0x30)
 
-Playボタンを押す
-Consoleを確認
-
-"✓ センサーに接続しました" と表示されればOK
-
-
-Scene ビューで確認
-
-緑色の点（センサーデータ）が表示される
-黄色の円（基準距離）が表示される
-
-
-壁に手を近づける
-
-赤い球（タッチポイント）が表示される
-水面エフェクトが発生する
----
-
-## 動作確認
-
-- 緑のゲージが表示されていれば、センサが正常に距離データを取得しています。  
-- 物体を前に置くと、ゲージの長さが変化します。  
-- UST-10LX は最大 10m、UST-20LX は最大 20m まで測定可能です。  
 
 ---
 
@@ -279,6 +336,9 @@ Scene ビューで確認
 | データが途切れる | LANケーブルの品質 | シールドケーブルを使用する |
 
 ## 参考になるかもしれないページ集
+
+測域センサの原理と使い方
+https://www.roboken.iit.tsukuba.ac.jp/lectures/software_science_experiment/2019/document/sokuiki_sensor.pdf
 
 https://sourceforge.net/p/urgnetwork/wiki/top_jp/
 
@@ -313,3 +373,6 @@ https://qiita.com/MOSO1409/items/bfe4d3baecffde94a172
 測域センサの汎用ツール "HokuyoUtil"
 https://zenn.dev/kjkmr/articles/7a170492293090
 https://github.com/STARRYWORKS-inc/HokuyoUtil
+
+仕様書
+https://img.atwiki.jp/kanazawa2robocar/attach/20/2/URG-Series_SCIP2_Compatible_Communication_Specification_JPN.pdf

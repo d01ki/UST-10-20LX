@@ -159,6 +159,15 @@ https://sourceforge.net/p/urgnetwork/wiki/urg_viewer_jp/
 ## Unityで直接UST-20LXと通信する方法
 
 
+新規作成
+
+Project ウィンドウで Assets/Scripts フォルダを右クリック
+Create > C# Script を選択
+名前を LiDARTest と入力（重要: 拡張子の.csは自動で付きます）
+Enter キーを押して確定
+LiDARTest をダブルクリックして開く
+全ての内容を削除
+以下を貼り付けて Ctrl+S で保存
 
 ```
 using System;
@@ -279,6 +288,19 @@ public class LiDARTest : MonoBehaviour
     }
 }
 ```
+Unityに戻る
+Visual Studio / VSCodeを閉じる
+Unityエディタに戻る
+Consoleウィンドウでコンパイルエラーがないか確認
+
+GameObjectにアタッチ
+Hierarchy で右クリック > Create Empty
+名前を「LiDARReceiver」に変更
+Projectウィンドウから LiDARTest スクリプトをドラッグして「LiDARReceiver」にドロップ
+
+確認
+Inspectorで「LiDAR Test (Script)」と表示されていればOK
+「Missing Script」と表示されている場合は、ファイル名が間違っています
 
 
 受信できているデータ
@@ -329,6 +351,19 @@ decode.cs（本来の命名はLiDARTest.csのまま、検証段階なので一�
 
 <img width="1916" height="993" alt="{5562BDC6-90C8-4286-A27B-AE5CECFF19F4}" src="https://github.com/user-attachments/assets/b8e40a91-5102-4d95-8eea-cac57658730a" />
 
+
+受信できない原因と対処法
+原因1: ファイアウォールがブロックしている可能性
+Windowsのファイアウォールを確認してください：
+Windowsファイアウォールの設定
+Windowsキー + R → wf.msc と入力してEnter
+「受信の規則」をクリック
+「新しい規則」をクリック
+「ポート」を選択 → 次へ
+「UDP」を選択、「特定のローカルポート」に 10940 を入力
+「接続を許可する」を選択
+すべてのプロファイルにチェック
+名前を「Unity LiDAR」として完了
 
 ---
 

@@ -51,6 +51,12 @@
    - **赤線** = プラス（＋）
    - **黒線** = マイナス（−）
    - ワニ口クリップなどで確実に接続してください
+ 
+  
+  
+  ![IMG_4925 (1)](https://github.com/user-attachments/assets/798be07a-b703-4b78-bc59-7fb252c91502)
+
+
 3. 電源を入れるとセンサが起動し、緑ランプが点灯します
 
 ### PCのIPアドレス設定
@@ -83,6 +89,13 @@ USTセンサは初期状態で **`192.168.0.10`** に設定されています。
 <img width="467" height="528" alt="{A24F080A-ED88-4CBE-8098-0EB36834D6A4}" src="https://github.com/user-attachments/assets/7dfdd09f-f4f6-4ded-a090-2d24f912a6f4" />
 
 6. 設定を保存し、ウィンドウを閉じます
+
+7. 疎通確認
+
+
+<img width="714" height="309" alt="{95BA340E-BD8D-4A20-A79F-595AA73BF4AD}" src="https://github.com/user-attachments/assets/c2bbc48e-9ec2-4f16-a3c6-5cbe65c70f29" />
+
+
 
 ### UrgBenriPlusの設定
 

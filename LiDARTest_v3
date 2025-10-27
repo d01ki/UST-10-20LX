@@ -1,0 +1,807 @@
+using System;
+using System.Net.Sockets;
+using System.Text;
+using UnityEngine;
+using System.Threading;
+using System.Collections.Generic;
+using System.Linq;
+
+public class LiDARTest : MonoBehaviour
+{
+    [Header("LiDAR Connection")]
+    public string lidarIP = "192.168.0.10";
+    public int lidarPort = 10940;
+    
+    [Header("Touch Detection")]
+    [Tooltip("タッチ検出の距離閾値（mm）")]
+    public float touchThreshold = 30f;
+    [Tooltip("連続検出のためのフレーム数")]
+    public int consistentFramesRequired = 3;
+    [Tooltip("タッチ領域の最小サイズ（隣接点数）")]
+    public int minTouchAreaSize = 2;
+    [Tooltip("タッチ間のクールダウン時間（秒）")]
+    public float touchCooldown = 0.2f;
+    [Tooltip("ノイズフィルタリングの強度")]
+    public float noiseFilterStrength = 5f;
+    
+    [Header("Spatial Filtering")]
+    [Tooltip("空間フィルタリングウィンドウサイズ")]
+    public int spatialFilterWindow = 3;
+    [Tooltip("時間フィルタリングの強度")]
+    public float temporalFilterAlpha = 0.7f;
+    
+    [Header("Visualization")]
+    public float visualScale = 0.01f;
+    public float maxDistance = 5000f;
+    public Color scanLineColor = Color.green;
+    public Color touchIndicatorColor = Color.red;
+    public float lineWidth = 0.05f;
+    
+    [Header("Camera Setup")]
+    public bool autoSetupCamera = true;
+    public float cameraHeight = 50f;
+    public float cameraSize = 25f;
+    
+    [Header("Debug")]
+    public bool showDebugInfo = true;
+    public bool showTouchVisualization = true;
+    
+    // 通信関連
+    private TcpClient client;
+    private NetworkStream stream;
+    private Thread receiveThread;
+    private bool isRunning = false;
+    
+    // データ管理
+    private Queue<string> dataQueue = new Queue<string>();
+    private object queueLock = new object();
+    
+    // 距離データ
+    private List<float> currentDistances = new List<float>();
+    private List<float> baselineDistances = new List<float>();
+    private List<float> filteredDistances = new List<float>();
+    private List<float> previousDistances = new List<float>();
+    
+    // タッチ検出
+    private int[,] consistentTouchFrames; // [index, frames]
+    private Dictionary<int, TouchInfo> activeTouches = new Dictionary<int, TouchInfo>();
+    private Dictionary<int, float> lastTouchTime = new Dictionary<int, float>();
+    private bool isCalibrated = false;
+    
+    // 可視化
+    private LineRenderer scanLineRenderer;
+    private GameObject sensorPosition;
+    private List<GameObject> touchEffects = new List<GameObject>();
+    
+    // 統計
+    private int totalDetections = 0;
+    private int validDetections = 0;
+    private float lastDebugTime = 0f;
+    
+    [System.Serializable]
+    public class TouchInfo
+    {
+        public Vector3 position;
+        public float intensity;
+        public int startIndex;
+        public int endIndex;
+        public float timestamp;
+        
+        public TouchInfo(Vector3 pos, float intens, int start, int end)
+        {
+            position = pos;
+            intensity = intens;
+            startIndex = start;
+            endIndex = end;
+            timestamp = Time.time;
+        }
+    }
+    
+    void Start()
+    {
+        Debug.Log("=== 改良版 LiDAR インタラクティブ検出システム ===");
+        
+        SetupCamera();
+        SetupVisualization();
+        ConnectToLiDAR();
+        
+        // 一定時間後に自動キャリブレーション
+        Invoke(nameof(PerformCalibration), 3f);
+    }
+    
+    void SetupCamera()
+    {
+        if (!autoSetupCamera) return;
+        
+        Camera mainCamera = Camera.main;
+        if (mainCamera == null) return;
+        
+        mainCamera.transform.position = new Vector3(0, cameraHeight, 0);
+        mainCamera.transform.rotation = Quaternion.Euler(90f, 0, 0);
+        mainCamera.orthographic = true;
+        mainCamera.orthographicSize = cameraSize;
+        mainCamera.backgroundColor = new Color(0.05f, 0.05f, 0.1f);
+    }
+    
+    void SetupVisualization()
+    {
+        // スキャンライン
+        scanLineRenderer = gameObject.AddComponent<LineRenderer>();
+        scanLineRenderer.material = new Material(Shader.Find("Sprites/Default"));
+        scanLineRenderer.startColor = scanLineColor;
+        scanLineRenderer.endColor = scanLineColor;
+        scanLineRenderer.startWidth = lineWidth;
+        scanLineRenderer.endWidth = lineWidth;
+        scanLineRenderer.useWorldSpace = true;
+        scanLineRenderer.positionCount = 0;
+        
+        // センサー位置
+        sensorPosition = GameObject.CreatePrimitive(PrimitiveType.Sphere);
+        sensorPosition.transform.position = Vector3.zero;
+        sensorPosition.transform.localScale = Vector3.one * 0.5f;
+        sensorPosition.name = "LiDAR Sensor";
+        
+        Renderer renderer = sensorPosition.GetComponent<Renderer>();
+        renderer.material = new Material(Shader.Find("Sprites/Default"));
+        renderer.material.color = Color.yellow;
+    }
+    
+    void ConnectToLiDAR()
+    {
+        try
+        {
+            Debug.Log($"LiDARに接続中: {lidarIP}:{lidarPort}");
+            
+            client = new TcpClient();
+            client.Connect(lidarIP, lidarPort);
+            stream = client.GetStream();
+            stream.ReadTimeout = 5000;
+            stream.WriteTimeout = 5000;
+            
+            // UST-20LX用のコマンド送信
+            SendCommand("SCIP2.0\n");
+            Thread.Sleep(200);
+            SendCommand("BM\n");
+            Thread.Sleep(200);
+            SendCommand("MD0000072500000\n"); // 連続測定開始
+            Thread.Sleep(200);
+            
+            isRunning = true;
+            receiveThread = new Thread(ReceiveDataThread);
+            receiveThread.IsBackground = true;
+            receiveThread.Start();
+            
+            Debug.Log("LiDAR接続完了");
+        }
+        catch (Exception e)
+        {
+            Debug.LogError($"LiDAR接続エラー: {e.Message}");
+        }
+    }
+    
+    void PerformCalibration()
+    {
+        lock (queueLock)
+        {
+            if (currentDistances.Count == 0)
+            {
+                Debug.LogWarning("キャリブレーション: データが不足しています");
+                Invoke(nameof(PerformCalibration), 2f); // 2秒後に再試行
+                return;
+            }
+            
+            // ベースライン距離を設定（ノイズフィルタリング適用）
+            baselineDistances = new List<float>(ApplySpatialFilter(currentDistances));
+            filteredDistances = new List<float>(baselineDistances);
+            previousDistances = new List<float>(baselineDistances);
+            
+            // 一貫性チェック用配列を初期化
+            consistentTouchFrames = new int[baselineDistances.Count, consistentFramesRequired];
+            
+            isCalibrated = true;
+            
+            // キャリブレーション統計
+            var validDistances = baselineDistances.Where(d => d > 0 && d < maxDistance).ToList();
+            if (validDistances.Any())
+            {
+                float avgDist = validDistances.Average();
+                float minDist = validDistances.Min();
+                float maxDist = validDistances.Max();
+                
+                Debug.Log("========== キャリブレーション完了 ==========");
+                Debug.Log($"測定点数: {baselineDistances.Count}");
+                Debug.Log($"有効測定点: {validDistances.Count}");
+                Debug.Log($"距離範囲: {minDist:F0}-{maxDist:F0}mm");
+                Debug.Log($"平均距離: {avgDist:F0}mm");
+                Debug.Log($"検出閾値: {touchThreshold}mm");
+                Debug.Log("==========================================");
+            }
+        }
+    }
+    
+    void Update()
+    {
+        ProcessReceivedData();
+        
+        if (currentDistances.Count > 0)
+        {
+            ApplyFiltering();
+            VisualizeScanning();
+            
+            if (isCalibrated)
+            {
+                DetectTouches();
+            }
+        }
+        
+        // デバッグ情報（3秒ごと）
+        if (showDebugInfo && Time.time - lastDebugTime > 3f)
+        {
+            ShowDebugInfo();
+            lastDebugTime = Time.time;
+        }
+        
+        // 古いタッチエフェクトのクリーンアップ
+        CleanupOldEffects();
+    }
+    
+    void ApplyFiltering()
+    {
+        if (currentDistances.Count == 0) return;
+        
+        // 空間フィルタリング（近隣点の平滑化）
+        var spatialFiltered = ApplySpatialFilter(currentDistances);
+        
+        // 時間フィルタリング（指数移動平均）
+        if (filteredDistances.Count == spatialFiltered.Count)
+        {
+            for (int i = 0; i < spatialFiltered.Count; i++)
+            {
+                filteredDistances[i] = temporalFilterAlpha * filteredDistances[i] + 
+                                     (1 - temporalFilterAlpha) * spatialFiltered[i];
+            }
+        }
+        else
+        {
+            filteredDistances = new List<float>(spatialFiltered);
+        }
+        
+        // 前フレームとの差分をチェック（急激な変化を検出）
+        previousDistances = new List<float>(filteredDistances);
+    }
+    
+    List<float> ApplySpatialFilter(List<float> distances)
+    {
+        var filtered = new List<float>(distances);
+        int halfWindow = spatialFilterWindow / 2;
+        
+        for (int i = halfWindow; i < distances.Count - halfWindow; i++)
+        {
+            var windowValues = new List<float>();
+            
+            for (int j = i - halfWindow; j <= i + halfWindow; j++)
+            {
+                if (j >= 0 && j < distances.Count && distances[j] > 0)
+                {
+                    windowValues.Add(distances[j]);
+                }
+            }
+            
+            if (windowValues.Count >= 2)
+            {
+                // 中央値フィルタ（外れ値に強い）
+                windowValues.Sort();
+                filtered[i] = windowValues[windowValues.Count / 2];
+            }
+        }
+        
+        return filtered;
+    }
+    
+    void DetectTouches()
+    {
+        if (baselineDistances.Count != filteredDistances.Count) return;
+        
+        var currentTouches = new List<TouchInfo>();
+        var touchCandidates = new List<int>();
+        
+        // Step 1: タッチ候補点を検出
+        for (int i = 0; i < filteredDistances.Count; i++)
+        {
+            float currentDist = filteredDistances[i];
+            float baseDist = baselineDistances[i];
+            
+            if (currentDist <= 0 || baseDist <= 0) continue;
+            
+            float distanceDiff = baseDist - currentDist;
+            
+            // 基本的な閾値チェック
+            if (distanceDiff > touchThreshold)
+            {
+                // ノイズチェック（周囲の点も似たような変化があるか）
+                if (IsValidTouch(i, distanceDiff))
+                {
+                    touchCandidates.Add(i);
+                }
+            }
+        }
+        
+        // Step 2: 候補点をクラスタリング（隣接点をグループ化）
+        var touchClusters = ClusterTouchPoints(touchCandidates);
+        
+        // Step 3: 各クラスタが有効なタッチかチェック
+        foreach (var cluster in touchClusters)
+        {
+            if (cluster.Count >= minTouchAreaSize)
+            {
+                // 一貫性チェック（複数フレームで検出されているか）
+                bool isConsistent = CheckTouchConsistency(cluster);
+                
+                if (isConsistent)
+                {
+                    var touchInfo = CreateTouchInfo(cluster);
+                    currentTouches.Add(touchInfo);
+                }
+            }
+        }
+        
+        // Step 4: 新しいタッチのみ処理（クールダウン適用）
+        ProcessValidTouches(currentTouches);
+    }
+    
+    bool IsValidTouch(int index, float distanceDiff)
+    {
+        // 周囲の点も同様の変化があるかチェック
+        int validNeighbors = 0;
+        int checkRange = 2;
+        
+        for (int offset = -checkRange; offset <= checkRange; offset++)
+        {
+            int neighborIndex = index + offset;
+            if (neighborIndex < 0 || neighborIndex >= filteredDistances.Count || neighborIndex == index)
+                continue;
+                
+            float neighborCurrent = filteredDistances[neighborIndex];
+            float neighborBase = baselineDistances[neighborIndex];
+            
+            if (neighborCurrent > 0 && neighborBase > 0)
+            {
+                float neighborDiff = neighborBase - neighborCurrent;
+                if (neighborDiff > touchThreshold * 0.5f) // 半分の閾値でも変化があれば
+                {
+                    validNeighbors++;
+                }
+            }
+        }
+        
+        return validNeighbors >= 1; // 最低1つの隣接点で変化があればOK
+    }
+    
+    List<List<int>> ClusterTouchPoints(List<int> candidates)
+    {
+        var clusters = new List<List<int>>();
+        var used = new HashSet<int>();
+        
+        foreach (int candidate in candidates)
+        {
+            if (used.Contains(candidate)) continue;
+            
+            var cluster = new List<int> { candidate };
+            used.Add(candidate);
+            
+            // 隣接点を探してクラスタに追加
+            for (int i = 0; i < cluster.Count; i++)
+            {
+                int current = cluster[i];
+                
+                // 前後の点をチェック
+                for (int offset = -1; offset <= 1; offset += 2)
+                {
+                    int neighbor = current + offset;
+                    if (candidates.Contains(neighbor) && !used.Contains(neighbor))
+                    {
+                        cluster.Add(neighbor);
+                        used.Add(neighbor);
+                    }
+                }
+            }
+            
+            clusters.Add(cluster);
+        }
+        
+        return clusters;
+    }
+    
+    bool CheckTouchConsistency(List<int> cluster)
+    {
+        // クラスタ内の点が複数フレームで検出されているかチェック
+        int consistentPoints = 0;
+        
+        foreach (int index in cluster)
+        {
+            // フレーム履歴を更新
+            for (int frame = consistentFramesRequired - 1; frame > 0; frame--)
+            {
+                consistentTouchFrames[index, frame] = consistentTouchFrames[index, frame - 1];
+            }
+            consistentTouchFrames[index, 0] = 1; // 現在フレームで検出
+            
+            // 必要フレーム数連続で検出されているかチェック
+            int consecutiveFrames = 0;
+            for (int frame = 0; frame < consistentFramesRequired; frame++)
+            {
+                if (consistentTouchFrames[index, frame] == 1)
+                    consecutiveFrames++;
+                else
+                    break;
+            }
+            
+            if (consecutiveFrames >= consistentFramesRequired)
+            {
+                consistentPoints++;
+            }
+        }
+        
+        return consistentPoints >= Mathf.Max(1, cluster.Count / 2); // 半分以上の点が一貫している
+    }
+    
+    TouchInfo CreateTouchInfo(List<int> cluster)
+    {
+        // クラスタの中心位置を計算
+        Vector3 centerPosition = Vector3.zero;
+        float totalIntensity = 0f;
+        
+        foreach (int index in cluster)
+        {
+            Vector3 pos = CalculateWorldPosition(index, filteredDistances[index]);
+            float intensity = baselineDistances[index] - filteredDistances[index];
+            
+            centerPosition += pos * intensity;
+            totalIntensity += intensity;
+        }
+        
+        if (totalIntensity > 0)
+        {
+            centerPosition /= totalIntensity;
+        }
+        
+        return new TouchInfo(centerPosition, totalIntensity, cluster.Min(), cluster.Max());
+    }
+    
+    void ProcessValidTouches(List<TouchInfo> detectedTouches)
+    {
+        float currentTime = Time.time;
+        
+        foreach (var touch in detectedTouches)
+        {
+            // 既存のタッチとの重複チェック
+            bool isNewTouch = true;
+            
+            foreach (var existingTouch in activeTouches.Values)
+            {
+                float distance = Vector3.Distance(touch.position, existingTouch.position);
+                if (distance < 2f) // 2m以内は同じタッチとみなす
+                {
+                    isNewTouch = false;
+                    break;
+                }
+            }
+            
+            if (isNewTouch)
+            {
+                // クールダウンチェック
+                bool canTrigger = true;
+                foreach (var kvp in lastTouchTime)
+                {
+                    if (currentTime - kvp.Value < touchCooldown)
+                    {
+                        canTrigger = false;
+                        break;
+                    }
+                }
+                
+                if (canTrigger)
+                {
+                    OnWallTouched(touch);
+                    lastTouchTime[touch.startIndex] = currentTime;
+                }
+            }
+        }
+        
+        // アクティブタッチの更新
+        activeTouches.Clear();
+        for (int i = 0; i < detectedTouches.Count; i++)
+        {
+            activeTouches[i] = detectedTouches[i];
+        }
+    }
+    
+    Vector3 CalculateWorldPosition(int index, float distance)
+    {
+        float angleRange = 270f; // UST-20LXの測定範囲
+        float angleStep = angleRange / (filteredDistances.Count - 1);
+        float startAngle = -135f; // 中央を0度とした場合の開始角度
+        
+        float angle = (startAngle + angleStep * index) * Mathf.Deg2Rad;
+        float x = distance * Mathf.Cos(angle) * visualScale;
+        float z = distance * Mathf.Sin(angle) * visualScale;
+        
+        return new Vector3(x, 0, z);
+    }
+    
+    void OnWallTouched(TouchInfo touchInfo)
+    {
+        totalDetections++;
+        validDetections++;
+        
+        Debug.Log($"✨ インタラクション検出 #{validDetections}");
+        Debug.Log($"   位置: ({touchInfo.position.x:F2}, {touchInfo.position.z:F2})");
+        Debug.Log($"   強度: {touchInfo.intensity:F1}mm");
+        Debug.Log($"   範囲: 点{touchInfo.startIndex}-{touchInfo.endIndex}");
+        
+        if (showTouchVisualization)
+        {
+            CreateTouchEffect(touchInfo);
+        }
+        
+        // ここでプロジェクションマッピングのエフェクトを呼び出し
+        TriggerProjectionEffect(touchInfo);
+    }
+    
+    void TriggerProjectionEffect(TouchInfo touchInfo)
+    {
+        // プロジェクションマッピング用のイベント
+        // この部分は具体的なエフェクトシステムに合わせて実装
+        
+        // 例: パーティクルシステムの起動
+        // ParticleSystem.main.startLifetime = touchInfo.intensity / 100f;
+        
+        // 例: 音響エフェクト
+        // AudioSource.PlayClipAtPoint(touchSound, touchInfo.position);
+        
+        // 例: Unity Eventsの呼び出し
+        // OnInteractionDetected?.Invoke(touchInfo.position, touchInfo.intensity);
+        
+        Debug.Log($"プロジェクションエフェクト発動: 位置{touchInfo.position}, 強度{touchInfo.intensity}");
+    }
+    
+    void CreateTouchEffect(TouchInfo touchInfo)
+    {
+        GameObject effect = GameObject.CreatePrimitive(PrimitiveType.Sphere);
+        effect.transform.position = touchInfo.position;
+        
+        // 強度に基づいてサイズを調整
+        float size = Mathf.Clamp(touchInfo.intensity / 20f, 0.5f, 3f);
+        effect.transform.localScale = Vector3.one * size;
+        effect.name = "Touch Effect";
+        
+        Renderer renderer = effect.GetComponent<Renderer>();
+        renderer.material = new Material(Shader.Find("Sprites/Default"));
+        renderer.material.color = touchIndicatorColor;
+        
+        touchEffects.Add(effect);
+        
+        // 3秒後に削除
+        Destroy(effect, 3f);
+    }
+    
+    void CleanupOldEffects()
+    {
+        touchEffects.RemoveAll(effect => effect == null);
+    }
+    
+    void VisualizeScanning()
+    {
+        if (filteredDistances.Count == 0) return;
+        
+        scanLineRenderer.positionCount = filteredDistances.Count + 1;
+        
+        for (int i = 0; i < filteredDistances.Count; i++)
+        {
+            Vector3 position = CalculateWorldPosition(i, filteredDistances[i]);
+            scanLineRenderer.SetPosition(i, position);
+        }
+        
+        // 最初の点に戻って線を閉じる
+        scanLineRenderer.SetPosition(filteredDistances.Count, scanLineRenderer.GetPosition(0));
+    }
+    
+    void ShowDebugInfo()
+    {
+        if (!isCalibrated || filteredDistances.Count == 0) return;
+        
+        float avgDiff = 0f;
+        int validDiffs = 0;
+        
+        for (int i = 0; i < filteredDistances.Count; i++)
+        {
+            if (i >= baselineDistances.Count) break;
+            
+            float current = filteredDistances[i];
+            float baseline = baselineDistances[i];
+            
+            if (current > 0 && baseline > 0)
+            {
+                avgDiff += Mathf.Abs(baseline - current);
+                validDiffs++;
+            }
+        }
+        
+        if (validDiffs > 0) avgDiff /= validDiffs;
+        
+        float detectionRate = totalDetections > 0 ? (float)validDetections / totalDetections * 100f : 0f;
+        
+        Debug.Log($"[モニタリング] 平均変化: {avgDiff:F1}mm | 有効検出率: {detectionRate:F1}% | アクティブタッチ: {activeTouches.Count}");
+    }
+    
+    // データ受信スレッド
+    void ReceiveDataThread()
+    {
+        byte[] buffer = new byte[8192];
+        StringBuilder messageBuilder = new StringBuilder();
+        
+        while (isRunning)
+        {
+            try
+            {
+                if (stream != null && stream.DataAvailable)
+                {
+                    int bytesRead = stream.Read(buffer, 0, buffer.Length);
+                    string chunk = Encoding.ASCII.GetString(buffer, 0, bytesRead);
+                    messageBuilder.Append(chunk);
+                    
+                    ProcessMessageBuffer(messageBuilder);
+                }
+                Thread.Sleep(1);
+            }
+            catch (Exception e)
+            {
+                if (isRunning) Debug.LogError($"データ受信エラー: {e.Message}");
+            }
+        }
+    }
+    
+    void ProcessMessageBuffer(StringBuilder messageBuilder)
+    {
+        string fullMessage = messageBuilder.ToString();
+        string[] lines = fullMessage.Split(new[] { '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries);
+        
+        if (!fullMessage.EndsWith("\n"))
+        {
+            messageBuilder.Clear();
+            messageBuilder.Append(lines[lines.Length - 1]);
+            Array.Resize(ref lines, lines.Length - 1);
+        }
+        else
+        {
+            messageBuilder.Clear();
+        }
+        
+        foreach (string line in lines)
+        {
+            if (!string.IsNullOrWhiteSpace(line))
+            {
+                lock (queueLock)
+                {
+                    dataQueue.Enqueue(line.Trim());
+                }
+            }
+        }
+    }
+    
+    void ProcessReceivedData()
+    {
+        lock (queueLock)
+        {
+            while (dataQueue.Count > 0)
+            {
+                ParseLiDARData(dataQueue.Dequeue());
+            }
+        }
+    }
+    
+    void ParseLiDARData(string line)
+    {
+        // コマンド応答やヘッダーをスキップ
+        if (line.StartsWith("MD") || line.Length <= 5 || 
+            (line.Length < 20 && char.IsUpper(line[0]))) return;
+        
+        // 距離データのみ処理
+        if (line.Length > 50)
+        {
+            var distances = DecodeSCIP2Data(line);
+            if (distances.Count > 0)
+            {
+                lock (queueLock)
+                {
+                    currentDistances = distances;
+                }
+            }
+        }
+    }
+    
+    List<float> DecodeSCIP2Data(string encodedData)
+    {
+        var distances = new List<float>();
+        
+        for (int i = 0; i <= encodedData.Length - 3; i += 3)
+        {
+            try
+            {
+                int val = ((encodedData[i] - 0x30) << 12) | 
+                          ((encodedData[i + 1] - 0x30) << 6) | 
+                          (encodedData[i + 2] - 0x30);
+                
+                distances.Add(val);
+            }
+            catch
+            {
+                break;
+            }
+        }
+        
+        return distances;
+    }
+    
+    void SendCommand(string command)
+    {
+        try
+        {
+            byte[] data = Encoding.ASCII.GetBytes(command);
+            stream.Write(data, 0, data.Length);
+            stream.Flush();
+        }
+        catch (Exception e)
+        {
+            Debug.LogError($"コマンド送信エラー: {e.Message}");
+        }
+    }
+    
+    void OnApplicationQuit()
+    {
+        isRunning = false;
+        
+        if (receiveThread != null && receiveThread.IsAlive)
+            receiveThread.Join(1000);
+        
+        if (stream != null)
+        {
+            try
+            {
+                SendCommand("QT\n");
+                Thread.Sleep(100);
+                stream.Close();
+            }
+            catch { }
+        }
+        
+        if (client != null)
+        {
+            try { client.Close(); }
+            catch { }
+        }
+    }
+    
+    // パブリック メソッド（外部からの制御用）
+    public void ManualCalibration()
+    {
+        PerformCalibration();
+    }
+    
+    public void SetTouchThreshold(float threshold)
+    {
+        touchThreshold = threshold;
+        Debug.Log($"タッチ閾値を{threshold}mmに設定");
+    }
+    
+    public bool IsSystemReady()
+    {
+        return isCalibrated && currentDistances.Count > 0;
+    }
+    
+    public void EnableDebugMode(bool enable)
+    {
+        showDebugInfo = enable;
+        showTouchVisualization = enable;
+    }
+}

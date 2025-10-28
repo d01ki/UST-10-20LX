@@ -1,0 +1,885 @@
+using System;
+using System.Net.Sockets;
+using System.Text;
+using UnityEngine;
+using System.Threading;
+using System.Collections.Generic;
+using System.Linq;
+
+/// <summary>
+/// 🎆 シンプル花火システム - アセットのみ + 夜空背景
+/// </summary>
+public class LiDARTest : MonoBehaviour
+{
+    [Header("LiDAR Connection")]
+    public string lidarIP = "192.168.0.10";
+    public int lidarPort = 10940;
+    
+    [Header("Touch Detection")]
+    public float touchThreshold = 30f;
+    public int consistentFramesRequired = 3;
+    public int minTouchAreaSize = 2;
+    public float touchCooldown = 0.2f;
+    
+    [Header("Spatial Filtering")]
+    public int spatialFilterWindow = 3;
+    public float temporalFilterAlpha = 0.7f;
+    
+    [Header("Visualization")]
+    public float visualScale = 0.01f;
+    public float maxDistance = 5000f;
+    
+    // ========== 🌟 緑のスキャンラインの表示設定 ==========
+    [Header("🌟 Scan Line Settings")]
+    [Tooltip("緑のスキャンラインを表示するか（非表示にする場合は❌）")]
+    public bool showScanLine = false;  // ← ここを false にすると緑のリングが消える
+    
+    public Color scanLineColor = Color.green;
+    public float lineWidth = 0.05f;
+    // ==================================================
+    
+    [Header("Camera Setup")]
+    public bool autoSetupCamera = false;
+    public float cameraHeight = 50f;
+    public float cameraSize = 25f;
+    
+    // ========== 🌌 夜空の背景設定 ==========
+    [Header("🌌 Night Sky Background")]
+    [Tooltip("夜空の背景色（真っ黒）")]
+    public Color skyColor = Color.black;  // ← 色を変えたい場合はここを変更
+    
+    [Tooltip("星を表示するか")]
+    public bool showStars = true;  // ← 星を消したい場合は false に
+    
+    [Tooltip("星の数")]
+    [Range(0, 500)]
+    public int starCount = 200;  // ← 星の数を変更
+    
+    [Tooltip("星のサイズ")]
+    [Range(0.01f, 0.3f)]
+    public float starSize = 0.1f;  // ← 星のサイズを変更
+    
+    [Tooltip("星の明るさ")]
+    [Range(0.1f, 1f)]
+    public float starBrightness = 0.8f;  // ← 星の明るさを変更
+    // ======================================
+    
+    [Header("Debug")]
+    public bool showDebugInfo = true;
+    
+    // ========== 🎆 花火アセット設定 ==========
+    [Header("🎆 Fireworks Asset")]
+    [Tooltip("花火プレハブの配列（アセット）")]
+    public GameObject[] fireworksPrefabs;
+    
+    [Tooltip("花火のサイズ")]
+    [Range(0.1f, 5f)]
+    public float fireworksScale = 1.5f;
+    
+    [Tooltip("花火の持続時間")]
+    [Range(1f, 10f)]
+    public float fireworksDuration = 5f;
+    
+    [Tooltip("花火の高さオフセット")]
+    [Range(0f, 10f)]
+    public float fireworksHeightOffset = 3f;
+    
+    [Tooltip("同時に表示できる最大花火数")]
+    [Range(1, 20)]
+    public int maxSimultaneousFireworks = 10;
+    
+    [Tooltip("タッチの強度でサイズが変化")]
+    public bool intensityAffectsScale = true;
+    
+    [Tooltip("効果音")]
+    public AudioClip[] fireworksSounds;
+    
+    [Tooltip("効果音のボリューム")]
+    [Range(0f, 1f)]
+    public float soundVolume = 0.8f;
+    // =======================================
+    
+    // 通信関連
+    private TcpClient client;
+    private NetworkStream stream;
+    private Thread receiveThread;
+    private bool isRunning = false;
+    
+    // データ管理
+    private Queue<string> dataQueue = new Queue<string>();
+    private object queueLock = new object();
+    
+    // 距離データ
+    private List<float> currentDistances = new List<float>();
+    private List<float> baselineDistances = new List<float>();
+    private List<float> filteredDistances = new List<float>();
+    private List<float> previousDistances = new List<float>();
+    
+    // タッチ検出
+    private int[,] consistentTouchFrames;
+    private Dictionary<int, TouchInfo> activeTouches = new Dictionary<int, TouchInfo>();
+    private Dictionary<int, float> lastTouchTime = new Dictionary<int, float>();
+    private bool isCalibrated = false;
+    
+    // 可視化
+    private LineRenderer scanLineRenderer;
+    private GameObject sensorPosition;
+    private List<GameObject> activeFireworks = new List<GameObject>();
+    private AudioSource audioSource;
+    
+    // 夜空の星
+    private List<GameObject> stars = new List<GameObject>();
+    
+    // 統計
+    private int validDetections = 0;
+    private float lastDebugTime = 0f;
+    
+    [System.Serializable]
+    public class TouchInfo
+    {
+        public Vector3 position;
+        public float intensity;
+        public int startIndex;
+        public int endIndex;
+        public float timestamp;
+        
+        public TouchInfo(Vector3 pos, float intens, int start, int end)
+        {
+            position = pos;
+            intensity = intens;
+            startIndex = start;
+            endIndex = end;
+            timestamp = Time.time;
+        }
+    }
+    
+    void Start()
+    {
+        Debug.Log("=== 🎆 シンプル花火システム + 夜空背景 ===");
+        
+        SetupCamera();
+        SetupVisualization();
+        CreateNightSky();  // 夜空を作成
+        SetupAudio();
+        ConnectToLiDAR();
+        
+        Invoke(nameof(PerformCalibration), 3f);
+        
+        if (fireworksPrefabs != null && fireworksPrefabs.Length > 0)
+        {
+            Debug.Log($"✅ {fireworksPrefabs.Length}個の花火プレハブを読み込みました");
+        }
+    }
+    
+    void SetupAudio()
+    {
+        audioSource = gameObject.AddComponent<AudioSource>();
+        audioSource.playOnAwake = false;
+        audioSource.spatialBlend = 0f;
+        audioSource.volume = soundVolume;
+    }
+    
+    void SetupCamera()
+    {
+        if (!autoSetupCamera) return;
+        
+        Camera mainCamera = Camera.main;
+        if (mainCamera == null) return;
+        
+        mainCamera.transform.position = new Vector3(0, cameraHeight, 0);
+        mainCamera.transform.rotation = Quaternion.Euler(90f, 0, 0);
+        mainCamera.orthographic = true;
+        mainCamera.orthographicSize = cameraSize;
+        
+        // ========== 夜空の背景色を設定 ==========
+        mainCamera.backgroundColor = skyColor;  // 真っ黒な夜空
+        // =======================================
+    }
+    
+    void SetupVisualization()
+    {
+        // ========== スキャンライン（緑のリング）==========
+        scanLineRenderer = gameObject.AddComponent<LineRenderer>();
+        scanLineRenderer.material = new Material(Shader.Find("Sprites/Default"));
+        scanLineRenderer.startColor = scanLineColor;
+        scanLineRenderer.endColor = scanLineColor;
+        scanLineRenderer.startWidth = lineWidth;
+        scanLineRenderer.endWidth = lineWidth;
+        scanLineRenderer.useWorldSpace = true;
+        
+        // スキャンラインの表示/非表示
+        scanLineRenderer.enabled = showScanLine;  // ← ここで表示制御
+        // ==============================================
+        
+        // センサー位置（黄色い球）
+        sensorPosition = GameObject.CreatePrimitive(PrimitiveType.Sphere);
+        sensorPosition.transform.position = Vector3.zero;
+        sensorPosition.transform.localScale = Vector3.one * 0.5f;
+        sensorPosition.name = "LiDAR Sensor";
+        
+        Renderer renderer = sensorPosition.GetComponent<Renderer>();
+        renderer.material = new Material(Shader.Find("Sprites/Default"));
+        renderer.material.color = Color.yellow;
+    }
+    
+    // ========== 🌌 夜空の作成 ==========
+    void CreateNightSky()
+    {
+        if (!showStars) return;  // 星を表示しない場合は終了
+        
+        // ランダムに星を配置
+        for (int i = 0; i < starCount; i++)
+        {
+            GameObject star = GameObject.CreatePrimitive(PrimitiveType.Sphere);
+            star.name = $"Star_{i}";
+            
+            // ランダムな位置
+            float x = UnityEngine.Random.Range(-cameraSize, cameraSize);
+            float z = UnityEngine.Random.Range(-cameraSize, cameraSize);
+            star.transform.position = new Vector3(x, 0.1f, z);  // 少し浮かせる
+            
+            // サイズ
+            float size = starSize * UnityEngine.Random.Range(0.5f, 1.5f);
+            star.transform.localScale = Vector3.one * size;
+            
+            // 白色で輝く
+            Renderer renderer = star.GetComponent<Renderer>();
+            Material mat = new Material(Shader.Find("Sprites/Default"));
+            Color starColor = Color.white * starBrightness;
+            starColor.a = UnityEngine.Random.Range(0.6f, 1f);  // 明るさにランダム性
+            mat.color = starColor;
+            renderer.material = mat;
+            
+            // コライダー削除（軽量化）
+            Destroy(star.GetComponent<Collider>());
+            
+            stars.Add(star);
+            
+            // キラキラアニメーション
+            StartCoroutine(TwinkleStar(star, renderer));
+        }
+        
+        Debug.Log($"🌟 {starCount}個の星を作成しました");
+    }
+    
+    // 星のキラキラアニメーション
+    System.Collections.IEnumerator TwinkleStar(GameObject star, Renderer renderer)
+    {
+        float baseAlpha = UnityEngine.Random.Range(0.6f, 1f);
+        float twinkleSpeed = UnityEngine.Random.Range(0.5f, 2f);
+        
+        while (star != null)
+        {
+            float t = Mathf.PingPong(Time.time * twinkleSpeed, 1f);
+            Color color = renderer.material.color;
+            color.a = Mathf.Lerp(baseAlpha * 0.3f, baseAlpha, t);
+            renderer.material.color = color;
+            
+            yield return null;
+        }
+    }
+    // ==================================
+    
+    void ConnectToLiDAR()
+    {
+        try
+        {
+            Debug.Log($"LiDARに接続中: {lidarIP}:{lidarPort}");
+            
+            client = new TcpClient();
+            client.Connect(lidarIP, lidarPort);
+            stream = client.GetStream();
+            stream.ReadTimeout = 5000;
+            stream.WriteTimeout = 5000;
+            
+            SendCommand("SCIP2.0\n");
+            Thread.Sleep(200);
+            SendCommand("BM\n");
+            Thread.Sleep(200);
+            SendCommand("MD0000072500000\n");
+            Thread.Sleep(200);
+            
+            isRunning = true;
+            receiveThread = new Thread(ReceiveDataThread);
+            receiveThread.IsBackground = true;
+            receiveThread.Start();
+            
+            Debug.Log("LiDAR接続完了");
+        }
+        catch (Exception e)
+        {
+            Debug.LogError($"LiDAR接続エラー: {e.Message}");
+        }
+    }
+    
+    void PerformCalibration()
+    {
+        lock (queueLock)
+        {
+            if (currentDistances.Count == 0)
+            {
+                Debug.LogWarning("キャリブレーション: データが不足しています");
+                Invoke(nameof(PerformCalibration), 2f);
+                return;
+            }
+            
+            baselineDistances = new List<float>(ApplySpatialFilter(currentDistances));
+            filteredDistances = new List<float>(baselineDistances);
+            previousDistances = new List<float>(baselineDistances);
+            consistentTouchFrames = new int[baselineDistances.Count, consistentFramesRequired];
+            
+            isCalibrated = true;
+            
+            var validDistances = baselineDistances.Where(d => d > 0 && d < maxDistance).ToList();
+            if (validDistances.Any())
+            {
+                Debug.Log("========== キャリブレーション完了 ==========");
+                Debug.Log($"測定点数: {baselineDistances.Count}");
+                Debug.Log($"有効測定点: {validDistances.Count}");
+                Debug.Log($"検出閾値: {touchThreshold}mm");
+                Debug.Log("=========================================");
+            }
+        }
+    }
+    
+    void Update()
+    {
+        ProcessReceivedData();
+        
+        if (currentDistances.Count > 0)
+        {
+            ApplyFiltering();
+            
+            // ========== スキャンライン表示の制御 ==========
+            if (showScanLine)
+            {
+                VisualizeScanning();  // 緑のリングを表示
+            }
+            // ===========================================
+            
+            if (isCalibrated)
+            {
+                DetectTouches();
+            }
+        }
+        
+        if (showDebugInfo && Time.time - lastDebugTime > 3f)
+        {
+            ShowDebugInfo();
+            lastDebugTime = Time.time;
+        }
+        
+        CleanupOldEffects();
+    }
+    
+    void ApplyFiltering()
+    {
+        if (currentDistances.Count == 0) return;
+        
+        var spatialFiltered = ApplySpatialFilter(currentDistances);
+        
+        if (filteredDistances.Count == spatialFiltered.Count)
+        {
+            for (int i = 0; i < spatialFiltered.Count; i++)
+            {
+                filteredDistances[i] = temporalFilterAlpha * filteredDistances[i] + 
+                                     (1 - temporalFilterAlpha) * spatialFiltered[i];
+            }
+        }
+        else
+        {
+            filteredDistances = new List<float>(spatialFiltered);
+        }
+        
+        previousDistances = new List<float>(filteredDistances);
+    }
+    
+    List<float> ApplySpatialFilter(List<float> distances)
+    {
+        var filtered = new List<float>(distances);
+        int halfWindow = spatialFilterWindow / 2;
+        
+        for (int i = halfWindow; i < distances.Count - halfWindow; i++)
+        {
+            var windowValues = new List<float>();
+            
+            for (int j = i - halfWindow; j <= i + halfWindow; j++)
+            {
+                if (j >= 0 && j < distances.Count && distances[j] > 0)
+                {
+                    windowValues.Add(distances[j]);
+                }
+            }
+            
+            if (windowValues.Count >= 2)
+            {
+                windowValues.Sort();
+                filtered[i] = windowValues[windowValues.Count / 2];
+            }
+        }
+        
+        return filtered;
+    }
+    
+    void DetectTouches()
+    {
+        if (baselineDistances.Count != filteredDistances.Count) return;
+        
+        var currentTouches = new List<TouchInfo>();
+        var touchCandidates = new List<int>();
+        
+        for (int i = 0; i < filteredDistances.Count; i++)
+        {
+            float currentDist = filteredDistances[i];
+            float baseDist = baselineDistances[i];
+            
+            if (currentDist <= 0 || baseDist <= 0) continue;
+            
+            float distanceDiff = baseDist - currentDist;
+            
+            if (distanceDiff > touchThreshold)
+            {
+                if (IsValidTouch(i, distanceDiff))
+                {
+                    touchCandidates.Add(i);
+                }
+            }
+        }
+        
+        var touchClusters = ClusterTouchPoints(touchCandidates);
+        
+        foreach (var cluster in touchClusters)
+        {
+            if (cluster.Count >= minTouchAreaSize)
+            {
+                bool isConsistent = CheckTouchConsistency(cluster);
+                
+                if (isConsistent)
+                {
+                    var touchInfo = CreateTouchInfo(cluster);
+                    currentTouches.Add(touchInfo);
+                }
+            }
+        }
+        
+        ProcessValidTouches(currentTouches);
+    }
+    
+    bool IsValidTouch(int index, float distanceDiff)
+    {
+        int validNeighbors = 0;
+        int checkRange = 2;
+        
+        for (int offset = -checkRange; offset <= checkRange; offset++)
+        {
+            int neighborIndex = index + offset;
+            if (neighborIndex < 0 || neighborIndex >= filteredDistances.Count || neighborIndex == index)
+                continue;
+                
+            float neighborCurrent = filteredDistances[neighborIndex];
+            float neighborBase = baselineDistances[neighborIndex];
+            
+            if (neighborCurrent > 0 && neighborBase > 0)
+            {
+                float neighborDiff = neighborBase - neighborCurrent;
+                if (neighborDiff > touchThreshold * 0.5f)
+                {
+                    validNeighbors++;
+                }
+            }
+        }
+        
+        return validNeighbors >= 1;
+    }
+    
+    List<List<int>> ClusterTouchPoints(List<int> candidates)
+    {
+        var clusters = new List<List<int>>();
+        var used = new HashSet<int>();
+        
+        foreach (int candidate in candidates)
+        {
+            if (used.Contains(candidate)) continue;
+            
+            var cluster = new List<int> { candidate };
+            used.Add(candidate);
+            
+            for (int i = 0; i < cluster.Count; i++)
+            {
+                int current = cluster[i];
+                
+                for (int offset = -1; offset <= 1; offset += 2)
+                {
+                    int neighbor = current + offset;
+                    if (candidates.Contains(neighbor) && !used.Contains(neighbor))
+                    {
+                        cluster.Add(neighbor);
+                        used.Add(neighbor);
+                    }
+                }
+            }
+            
+            clusters.Add(cluster);
+        }
+        
+        return clusters;
+    }
+    
+    bool CheckTouchConsistency(List<int> cluster)
+    {
+        int consistentPoints = 0;
+        
+        foreach (int index in cluster)
+        {
+            for (int frame = consistentFramesRequired - 1; frame > 0; frame--)
+            {
+                consistentTouchFrames[index, frame] = consistentTouchFrames[index, frame - 1];
+            }
+            consistentTouchFrames[index, 0] = 1;
+            
+            int consecutiveFrames = 0;
+            for (int frame = 0; frame < consistentFramesRequired; frame++)
+            {
+                if (consistentTouchFrames[index, frame] == 1)
+                    consecutiveFrames++;
+                else
+                    break;
+            }
+            
+            if (consecutiveFrames >= consistentFramesRequired)
+            {
+                consistentPoints++;
+            }
+        }
+        
+        return consistentPoints >= Mathf.Max(1, cluster.Count / 2);
+    }
+    
+    TouchInfo CreateTouchInfo(List<int> cluster)
+    {
+        Vector3 centerPosition = Vector3.zero;
+        float totalIntensity = 0f;
+        
+        foreach (int index in cluster)
+        {
+            Vector3 pos = CalculateWorldPosition(index, filteredDistances[index]);
+            float intensity = baselineDistances[index] - filteredDistances[index];
+            
+            centerPosition += pos * intensity;
+            totalIntensity += intensity;
+        }
+        
+        if (totalIntensity > 0)
+        {
+            centerPosition /= totalIntensity;
+        }
+        
+        return new TouchInfo(centerPosition, totalIntensity, cluster.Min(), cluster.Max());
+    }
+    
+    void ProcessValidTouches(List<TouchInfo> detectedTouches)
+    {
+        float currentTime = Time.time;
+        
+        foreach (var touch in detectedTouches)
+        {
+            bool isNewTouch = true;
+            
+            foreach (var existingTouch in activeTouches.Values)
+            {
+                float distance = Vector3.Distance(touch.position, existingTouch.position);
+                if (distance < 2f)
+                {
+                    isNewTouch = false;
+                    break;
+                }
+            }
+            
+            if (isNewTouch)
+            {
+                bool canTrigger = true;
+                foreach (var kvp in lastTouchTime)
+                {
+                    if (currentTime - kvp.Value < touchCooldown)
+                    {
+                        canTrigger = false;
+                        break;
+                    }
+                }
+                
+                if (canTrigger)
+                {
+                    OnWallTouched(touch);
+                    lastTouchTime[touch.startIndex] = currentTime;
+                }
+            }
+        }
+        
+        activeTouches.Clear();
+        for (int i = 0; i < detectedTouches.Count; i++)
+        {
+            activeTouches[i] = detectedTouches[i];
+        }
+    }
+    
+    Vector3 CalculateWorldPosition(int index, float distance)
+    {
+        float angleRange = 270f;
+        float angleStep = angleRange / (filteredDistances.Count - 1);
+        float startAngle = -135f;
+        
+        float angle = (startAngle + angleStep * index) * Mathf.Deg2Rad;
+        float x = distance * Mathf.Cos(angle) * visualScale;
+        float z = distance * Mathf.Sin(angle) * visualScale;
+        
+        return new Vector3(x, 0, z);
+    }
+    
+    void OnWallTouched(TouchInfo touchInfo)
+    {
+        validDetections++;
+        
+        Debug.Log($"🎆 タッチ検出 #{validDetections}");
+        
+        // 花火アセットのみを発動
+        SpawnFireworksOnly(touchInfo);
+    }
+    
+    // ========== 🎆 花火アセットのみ発動 ==========
+    void SpawnFireworksOnly(TouchInfo touchInfo)
+    {
+        // パフォーマンス制限
+        if (activeFireworks.Count >= maxSimultaneousFireworks)
+        {
+            Destroy(activeFireworks[0]);
+            activeFireworks.RemoveAt(0);
+        }
+        
+        Vector3 spawnPosition = touchInfo.position + Vector3.up * fireworksHeightOffset;
+        
+        if (fireworksPrefabs != null && fireworksPrefabs.Length > 0)
+        {
+            // ランダムに花火を選択
+            GameObject selectedPrefab = fireworksPrefabs[UnityEngine.Random.Range(0, fireworksPrefabs.Length)];
+            GameObject fireworks = Instantiate(selectedPrefab, spawnPosition, Quaternion.identity);
+            fireworks.name = $"Firework_{validDetections}";
+            
+            // サイズ調整
+            float scale = fireworksScale;
+            if (intensityAffectsScale)
+            {
+                float intensityFactor = Mathf.Clamp(touchInfo.intensity / 100f, 0.5f, 2f);
+                scale *= intensityFactor;
+            }
+            fireworks.transform.localScale = Vector3.one * scale;
+            
+            // パーティクル再生
+            ParticleSystem[] particleSystems = fireworks.GetComponentsInChildren<ParticleSystem>();
+            foreach (var ps in particleSystems)
+            {
+                ps.Play();
+            }
+            
+            activeFireworks.Add(fireworks);
+            Destroy(fireworks, fireworksDuration);
+            
+            Debug.Log($"🎆 花火発射: {selectedPrefab.name}");
+        }
+        else
+        {
+            Debug.LogWarning("⚠ 花火プレハブが設定されていません");
+        }
+        
+        // 効果音
+        PlayFireworkSound();
+    }
+    
+    void PlayFireworkSound()
+    {
+        if (audioSource != null && fireworksSounds != null && fireworksSounds.Length > 0)
+        {
+            AudioClip selectedSound = fireworksSounds[UnityEngine.Random.Range(0, fireworksSounds.Length)];
+            audioSource.PlayOneShot(selectedSound, soundVolume);
+        }
+    }
+    // ==========================================
+    
+    void CleanupOldEffects()
+    {
+        activeFireworks.RemoveAll(firework => firework == null);
+    }
+    
+    void VisualizeScanning()
+    {
+        if (filteredDistances.Count == 0) return;
+        
+        scanLineRenderer.positionCount = filteredDistances.Count;
+        
+        for (int i = 0; i < filteredDistances.Count; i++)
+        {
+            Vector3 position = CalculateWorldPosition(i, filteredDistances[i]);
+            scanLineRenderer.SetPosition(i, position);
+        }
+    }
+    
+    void ShowDebugInfo()
+    {
+        if (!isCalibrated || filteredDistances.Count == 0) return;
+        
+        Debug.Log($"[モニタリング] 有効検出: {validDetections} | アクティブ花火: {activeFireworks.Count} | 星: {stars.Count}");
+    }
+    
+    void ReceiveDataThread()
+    {
+        byte[] buffer = new byte[8192];
+        StringBuilder messageBuilder = new StringBuilder();
+        
+        while (isRunning)
+        {
+            try
+            {
+                if (stream != null && stream.DataAvailable)
+                {
+                    int bytesRead = stream.Read(buffer, 0, buffer.Length);
+                    string chunk = Encoding.ASCII.GetString(buffer, 0, bytesRead);
+                    messageBuilder.Append(chunk);
+                    
+                    ProcessMessageBuffer(messageBuilder);
+                }
+                Thread.Sleep(1);
+            }
+            catch (Exception e)
+            {
+                if (isRunning) Debug.LogError($"データ受信エラー: {e.Message}");
+            }
+        }
+    }
+    
+    void ProcessMessageBuffer(StringBuilder messageBuilder)
+    {
+        string fullMessage = messageBuilder.ToString();
+        string[] lines = fullMessage.Split(new[] { '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries);
+        
+        if (!fullMessage.EndsWith("\n"))
+        {
+            messageBuilder.Clear();
+            messageBuilder.Append(lines[lines.Length - 1]);
+            Array.Resize(ref lines, lines.Length - 1);
+        }
+        else
+        {
+            messageBuilder.Clear();
+        }
+        
+        foreach (string line in lines)
+        {
+            if (!string.IsNullOrWhiteSpace(line))
+            {
+                lock (queueLock)
+                {
+                    dataQueue.Enqueue(line.Trim());
+                }
+            }
+        }
+    }
+    
+    void ProcessReceivedData()
+    {
+        lock (queueLock)
+        {
+            while (dataQueue.Count > 0)
+            {
+                ParseLiDARData(dataQueue.Dequeue());
+            }
+        }
+    }
+    
+    void ParseLiDARData(string line)
+    {
+        if (line.StartsWith("MD") || line.Length <= 5 || 
+            (line.Length < 20 && char.IsUpper(line[0]))) return;
+        
+        if (line.Length > 50)
+        {
+            var distances = DecodeSCIP2Data(line);
+            if (distances.Count > 0)
+            {
+                lock (queueLock)
+                {
+                    currentDistances = distances;
+                }
+            }
+        }
+    }
+    
+    List<float> DecodeSCIP2Data(string encodedData)
+    {
+        var distances = new List<float>();
+        
+        for (int i = 0; i <= encodedData.Length - 3; i += 3)
+        {
+            try
+            {
+                int val = ((encodedData[i] - 0x30) << 12) | 
+                          ((encodedData[i + 1] - 0x30) << 6) | 
+                          (encodedData[i + 2] - 0x30);
+                
+                distances.Add(val);
+            }
+            catch
+            {
+                break;
+            }
+        }
+        
+        return distances;
+    }
+    
+    void SendCommand(string command)
+    {
+        try
+        {
+            byte[] data = Encoding.ASCII.GetBytes(command);
+            stream.Write(data, 0, data.Length);
+            stream.Flush();
+        }
+        catch (Exception e)
+        {
+            Debug.LogError($"コマンド送信エラー: {e.Message}");
+        }
+    }
+    
+    void OnApplicationQuit()
+    {
+        isRunning = false;
+        
+        if (receiveThread != null && receiveThread.IsAlive)
+            receiveThread.Join(1000);
+        
+        if (stream != null)
+        {
+            try
+            {
+                SendCommand("QT\n");
+                Thread.Sleep(100);
+                stream.Close();
+            }
+            catch { }
+        }
+        
+        if (client != null)
+        {
+            try { client.Close(); }
+            catch { }
+        }
+        
+        // 星を削除
+        foreach (var star in stars)
+        {
+            if (star != null) Destroy(star);
+        }
+    }
+    
+    public void ManualCalibration() => PerformCalibration();
+    public bool IsSystemReady() => isCalibrated && currentDistances.Count > 0;
+}
